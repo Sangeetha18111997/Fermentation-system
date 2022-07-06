@@ -1,0 +1,1212 @@
+
+	 //*** Lab4b ***
+/***********************************************************************************************
+	File Name:	ELNC6007SKLab4b.c
+	Author:		KSangeetha
+	Date:		03/04/2020
+	Modified:	None
+	 Fanshawe College, 2016
+
+	Description: Sensing temperature, pressure and carbondioxide values from ADC sensors and indicating the operations of Fermentation Vat system and running the motor according to the pattern array
+	
+***********************************************************************************************/
+
+// Preprocessor ===================================================================
+
+#include "pragmas.h"
+#include <adc.h>
+#include <stdlib.h>
+#include <delays.h>
+#include <stdio.h>
+#include <p18f45k22.h>
+#include "usart.h"
+
+
+// Constants ======================================================================
+
+#define TRUE 1
+#define	FALSE 0
+
+#define LED_ON 1				// Simple way to handle the LED operation,
+#define LED_OFF 0			
+
+#define HIGH 1
+#define LOW 0
+					
+#define TMR0FLAG INTCONbits.TMR0IF
+#define GO ADCON0bits.GO
+#define MAXSAMP 25
+
+#define TEMP 0X01
+#define PRES 0X05
+#define CO2 0x09
+
+#define SENSNUM 3
+#define MTR 2
+#define SIZE 4
+
+#define TCOEFF 0.0285
+#define TOFFSET 1.4285
+#define PCOEFF 0.02
+#define CCOEFF 0.00278
+#define CCOFFSET -0.556
+
+// ADC Resolution
+#define ADCRESV	5
+#define ADCRESB	1024
+
+#define PB1 PORTAbits.RA4
+#define PB2 PORTAbits.RA5
+#define PB3 PORTAbits.RA6
+#define PB4 PORTAbits.RA7
+
+#define PBMASK 0XFF
+#define CHANSELECT 2
+
+#define T 0
+#define P 1
+#define C 2
+
+#define TEMPHIGH 65
+#define TEMPLOW 12
+#define PRESHIGH 103
+#define PRESLOW 17
+#define CHIGH 1200
+#define CLOW 350
+
+#define TEMPLOWLED PORTDbits.RD2
+#define TEMPHIGHLED PORTDbits.RD3
+#define PRESLOWLED PORTDbits.RD4
+#define PRESHIGHLED PORTDbits.RD5
+
+#define TROUBLE PORTBbits.RB5
+#define HEATER PORTBbits.RB4
+
+#define PATTERN4 0X08
+#define PATTERN3 0X04
+#define PATTERN2 0X02
+#define PATTERN1 0X01
+
+#define MODE PORTAbits.RA4
+#define CHANSEL PORTAbits.RA5
+#define INCREMENT PORTAbits.RA6
+#define DECREMENT PORTAbits.RA7
+
+#define COUNT 4
+#define ONESEC 4
+
+#define BUFSIZE 30
+#define CONTROLLER 1
+#define ADDRESS 888
+
+#define RXBYTE	RCREG2
+#define RCFLAG	PIR3bits.RC2IF
+#define TOKENSIZE 10
+
+#define CMDSTM 0
+#define ADDYTO 0
+#define ADDYFM 1
+	
+									
+// Global Variables ===============================================================
+
+char buf[BUFSIZE]={0}; //Creating an array of buffer size 30
+char flag=FALSE;
+int count=0; 
+char rxBuf[BUFSIZE];  
+char *tokens[TOKENSIZE]={0};   
+char validateReady=0;       
+int pattern[4]={0X08,0X04,0X02,0X01};
+
+
+typedef struct sensorCh    //creating data structure for sensor channels
+{
+	int currentSample;	
+	int sample[MAXSAMP];
+	int avgSample;
+	int insertAt;
+	int highLimit;
+	int lowLimit;
+	int state;
+	char avgRdy;
+}sensorCh_t;
+
+typedef struct motor  //Data structure for motor and dampener
+{
+	int position;
+	int currentPosition;
+	int pattern;
+	int patternCounter;
+	int data;
+	int control;
+}motor_t;
+
+
+typedef struct fvs    // creating data structure for fvs
+{
+	char address[SIZE];
+	sensorCh_t sensors[SENSNUM];
+	motor_t motor[MTR];
+	char mode;
+	char chanSel;
+	int indicator;
+	int heater;
+}fvs_t;
+fvs_t fvs888;
+
+
+// Functions ======================================================================
+
+/*** initialiseFvs: **************************************************************
+Author:		KSangeetha
+Date:		27 Jan,2020
+Modified:	None
+Desc:		Initialising of FVS
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void initialiseFvs(void)  
+{
+	int i=0;
+	for(i=0;i<MAXSAMP;i++)
+	{	
+		fvs888.sensors[T].sample[i]=0;
+	}
+	fvs888.sensors[T].currentSample=FALSE;
+	fvs888.sensors[T].avgSample=FALSE;
+	fvs888.sensors[T].highLimit=TEMPHIGH;
+	fvs888.sensors[T].lowLimit=TEMPLOW;
+	fvs888.sensors[T].state=FALSE;
+	fvs888.sensors[T].insertAt=0;
+	fvs888.sensors[T].avgRdy = FALSE;	//initially average ready is zero
+
+	for(i=0;i<MAXSAMP;i++)
+	{	
+		fvs888.sensors[P].sample[i]=0;
+	}
+	fvs888.sensors[P].currentSample=FALSE;
+	fvs888.sensors[P].avgSample=FALSE;
+	fvs888.sensors[P].highLimit=PRESHIGH;
+	fvs888.sensors[P].lowLimit=PRESLOW;
+	fvs888.sensors[P].state=FALSE;
+	fvs888.sensors[P].insertAt=0;
+	fvs888.sensors[P].avgRdy = FALSE;
+
+	for(i=0;i<MAXSAMP;i++)
+	{	
+		fvs888.sensors[C].sample[i]=0;
+	}
+	fvs888.sensors[C].currentSample=FALSE;
+	fvs888.sensors[C].avgSample=FALSE;
+	fvs888.sensors[C].highLimit=CHIGH;
+	fvs888.sensors[C].lowLimit=CLOW;
+	fvs888.sensors[C].state=FALSE;
+	fvs888.sensors[C].insertAt=0;
+	fvs888.sensors[C].avgRdy = FALSE;
+
+	fvs888.motor[0].position=357; //motor position is 357
+	fvs888.motor[0].currentPosition=0;
+	fvs888.motor[0].pattern=0;
+	fvs888.motor[0].patternCounter=0;
+	fvs888.motor[0].data=0;
+	fvs888.motor[0].control=0;
+	
+	fvs888.motor[1].position=30; //dampener position is 30
+	fvs888.motor[1].currentPosition=0;
+	fvs888.motor[1].pattern=0;
+	fvs888.motor[1].patternCounter=0;
+	fvs888.motor[1].data=0;
+	fvs888.motor[1].control=0;
+}
+//eo initialiseFvs function::
+
+
+/*** set_osc_p18f45k22_4MHz: ******************************************************
+Author:     KSangeetha
+Date:		27 Jan,2020		
+Modified:	None
+Desc:		Sets the internal Oscillator of the Pic 18F45K22 to 4MHz.
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void set_osc_p18f45k22_4MHz(void)
+{
+	OSCCON =  0x52;					// Sleep on slp cmd, HFINT 4MHz, INT OSC Blk
+	OSCCON2 = 0x04;					// PLL No, CLK from OSC, MF off, Sec OSC off, Pri OSC
+	OSCTUNE = 0x80;					// PLL disabled, Default factory freq tuning
+    while (OSCCONbits.HFIOFS != 1); 	// wait for osc to become stable
+}
+//eo: set_osc_p18f45k22_4MHz:: 
+
+
+/*** portConfig: **************************************************************
+Author:		KSangeetha
+Date:		27 Jan,2020
+Modified:	None
+Desc:		Port configuration
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void portConfig(void)
+{
+  //PORT A for PB
+	LATA=0x00; 
+  	ANSELA=0x07; //RA0 is analog 
+	TRISA=0xFF;  //RA0 is input
+  
+  //PORT B for motor led's
+ 	LATB=0x00;    // initially LED's are off
+	ANSELB=0x00;  //Digital output
+    TRISB=0x00;   
+  
+  //PORT D for temperature and pressure high/low indication
+ 	LATD=0x00;   //initially LED's are off
+   	ANSELD=0x00; 
+  	TRISD=0x00;
+
+   //PORTC for dampener led's
+	LATC=0X00;   //initially LED's are off
+	ANSELC=0X00;
+	TRISC=0X00;
+}
+//eo portConfig function::
+
+
+/***serialConfig: ******************************************************
+Author:     KSangeetha
+Date:		27 Jan,2020		
+Modified:	None
+Desc:		Sets the internal Oscillator of the Pic 18F45K22 to 4MHz.
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void serialConfig(void)
+{
+	SPBRG1=25;    //serial port1
+	RCSTA1=0X90;  //Enables asynchronous serial receiver
+	TXSTA1=0X26;   //Enables asynchronous serial transmitter
+	BAUDCON1=0X40;	//Baudrate 9600Hz
+	
+	SPBRG2=12;
+	RCSTA2=0X90;  //Enables asynchronous serial receiver
+	TXSTA2=0X26;   //Enables asynchronous serial transmitter
+	BAUDCON2=0X40;	//Baudrate 9600Hz
+}
+//eo serialConfig function::
+
+void configInterrupts(void)
+{
+	INTCON=0XC0;
+	PIE3bits.RC2IE=1;
+}
+
+/***configTMR0: **************************************************************
+Author:		KSangeetha
+Date:		26 March,2020
+Modified:	KSangeetha
+Desc:		Configuration of time to 0.25 seconds
+Input: 		None
+Returns:	None
+********************************************************************************/
+void configTMR0(void)
+{
+	T0CON=0X91; //setting configuration to 0.25s
+	TMR0H=0X0B;  //set for 0.25s time interval
+	TMR0L=0XDC;  //set for 0.25s time interval
+	TMR0FLAG=FALSE;
+}
+//eo configTMR0 function::
+
+
+/***resetTMR0: **************************************************************
+Author:		KSangeetha
+Date:		27 Jan,2020
+Modified:	None
+Desc:		Reset of timer configuration.
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void resetTMR0(void)
+{
+	TMR0FLAG=FALSE;
+	TMR0H=0X0B;
+	TMR0L=0XDC;
+}
+//eo resetTMR0 function::
+
+
+/*** initializeADC: **************************************************************
+Author:		CTalbot
+Date:		14 Sept, 2016
+Modified:	KSangeetha
+Desc:		Initalizes the ADC Module
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void initializeADC(void)
+{
+  
+	ADCON1=0X00;
+	ADCON2=0XA9; //  12 TAD, Fosc/8 channel for temperature and pressure
+	
+}
+//eo initializeADC:: *************************************************************
+
+
+/***getSamples : **************************************************************
+Author:		CTalbot
+Date:		25 March,2020
+Modified:	KSangeetha
+Desc:		Getting samples of each sensors and calculating average values using linear equations and storing it in a variable
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void getNewSamples()	
+{
+	float sample = 0;		// float is needed as partial values will be lost during math.
+	char count = 0, chID = 0;
+	long sum = 0;
+	
+	for( chID=0; chID<SENSNUM; chID++ )
+	{
+		// ADC sampling from hardware.
+		ADCON0bits.CHS = chID;
+		GO = TRUE;
+		ADCON0bits.ADON=TRUE;
+		while( GO );
+		sample = ADRES;
+		// Convert to a virtual voltage
+		sample /= ADCRESB;	// Divide by bits of sampling
+		sample *= ADCRESV;	// Multiply by max Voltage reference
+		switch( chID )
+		{
+			case T:  //When chID is 0
+				sample -= TOFFSET;
+				sample /= TCOEFF;
+				break;
+			case P:  //when chID is 1
+				sample /= PCOEFF;
+				break;
+			case C:  //when chID is 2
+				sample -= CCOFFSET;
+				sample /= CCOEFF;
+				break;
+			default:
+				break;
+		}// eo swith for linear equation
+		
+		// Save new sample into the data structure
+		fvs888.sensors[ chID ].currentSample = sample;
+		fvs888.sensors[ chID ].sample[ fvs888.sensors[ chID ].insertAt ] = fvs888.sensors[ chID ].currentSample;
+		// House-keeping for next sample
+		fvs888.sensors[ chID ].insertAt++;
+		if( fvs888.sensors[ chID ].insertAt >= MAXSAMP )
+		{
+			fvs888.sensors[ chID ].insertAt = 0;
+			fvs888.sensors[ chID ].avgRdy = TRUE;  // flag for when to calculate the average of the channel.
+		}
+		
+		// If array has been filled with samples, calculate the average for the channel.
+		if( fvs888.sensors[ chID ].avgRdy )
+		{
+			sum = 0;
+			// Add the population together
+			for( count=0; count<MAXSAMP; count++ )
+			{
+				sum += fvs888.sensors[ chID ].sample[ count ];
+			}
+			// Divide by the number in the population
+			fvs888.sensors[ chID ].avgSample = sum / MAXSAMP;
+		}
+	}// eo channel for loop
+}
+// eo getNewSamples::
+
+/********mode**********************************
+Author:     KSangeetha
+Date:		14 Feb,2020		
+Modified:	None
+Desc:		Checks if the mode is high or low limit
+Input: 		None
+Returns:	None
+**********************************************************************************/
+
+void mode(void)
+{
+	fvs888.mode=!fvs888.mode;    // points to low or high limit
+}
+//eo mode function::
+
+/***ChanSel******************************************************
+Author:     KSangeetha
+Date:		14 Feb,2020		
+Modified:	None
+Desc:		Checks if the channel is temperature or pressure
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void chanSel(void)
+{
+	fvs888.chanSel++;
+	if(fvs888.chanSel>=3) //assigning values to each channel
+	{
+		fvs888.chanSel=0;       
+	}
+}
+//eo channel select function::
+
+
+/***increment******************************************************
+Author:     KSangeetha
+Date:		14 Feb,2020		
+Modified:	None
+Desc:		Increment operation
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void increment(void)
+{
+	flag=TRUE;  //declaring flag to true so that when flag is caleed, it can be used to print CONLIM statement when increment button is pressed
+	if(fvs888.mode==HIGH)
+	{
+		if(fvs888.chanSel==T)
+		{
+			fvs888.sensors[T].highLimit++;
+		}
+		else if(fvs888.chanSel==P)
+		{
+			fvs888.sensors[P].highLimit++;
+		}
+		else if(fvs888.chanSel==C)
+		{
+			fvs888.sensors[C].highLimit++;
+		}
+	}
+
+	else if(fvs888.mode==LOW)
+	{
+		if(fvs888.chanSel==T)
+		{
+			fvs888.sensors[T].lowLimit++;
+		}
+		else if(fvs888.chanSel==P)
+		{
+			fvs888.sensors[P].lowLimit++;
+		}	
+		else if(fvs888.chanSel==C)
+		{
+			fvs888.sensors[C].lowLimit++;
+		}					
+	}
+}
+//eo increment function::
+
+/***decrement******************************************************
+Author:     KSangeetha
+Date:		14 Feb,2020		
+Modified:	None
+Desc:		Decrement operation
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void decrement(void)
+{
+	flag=TRUE;
+	if(fvs888.mode==HIGH)
+	{
+		if(fvs888.chanSel==T)
+		{
+			fvs888.sensors[T].highLimit--;
+		}
+		else if(fvs888.chanSel==P)
+		{
+			fvs888.sensors[P].highLimit--;
+		}
+		else if(fvs888.chanSel==C)
+		{
+			fvs888.sensors[C].highLimit--;
+		}
+	}//eo if statement::
+
+	else if(fvs888.mode==LOW)
+	{
+		if(fvs888.chanSel==T)
+		{
+			fvs888.sensors[T].lowLimit--;
+		}
+		else if(fvs888.chanSel==P)
+		{
+			fvs888.sensors[P].lowLimit--;
+		}
+		else if(fvs888.chanSel==C)
+		{
+			fvs888.sensors[C].lowLimit--;
+		}
+	}
+}
+//eo decrement function::
+
+
+/***pbState******************************************************
+Author:     KSangeetha
+Date:		14 Feb,2020		
+Modified:	None
+Desc:		Pushbutton operation 
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void pbState(void)
+{
+	char pbSwitch=0;
+	pbSwitch=PORTA&PBMASK;
+	if(MODE==FALSE)
+	{
+		mode(); //calling of mode when mode is low
+	}
+	else if(CHANSEL==FALSE)
+	{
+		chanSel(); //calling of channel select if channel is false
+	}
+	else if(INCREMENT==FALSE)
+	{
+		increment();
+	}
+	else if(DECREMENT==FALSE)
+	{
+		decrement();
+	}
+}
+//eo pbstate::
+
+
+/***motor******************************************************
+Author:     KSangeetha
+Date:		14 Feb,2020		
+Modified:	None
+Desc:		motor funcion 
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void motor(void)
+{
+	if(fvs888.sensors[T].avgSample>fvs888.sensors[T].highLimit||fvs888.sensors[P].avgSample>fvs888.sensors[P].highLimit)
+	{
+		LATB&=0X00;
+		if(fvs888.motor[0].currentPosition!=fvs888.motor[0].position)
+		{
+			fvs888.motor[0].pattern=pattern[fvs888.motor[0].patternCounter];
+			LATB|=fvs888.motor[0].pattern;
+	
+			fvs888.motor[0].patternCounter++;
+	
+			fvs888.motor[0].currentPosition+=3;
+
+			if(fvs888.motor[0].currentPosition>357)   //if current position exceeds 357 degrees, then current position of motor is zero
+			{
+				fvs888.motor[0].currentPosition=0;
+			}
+			if(fvs888.motor[0].patternCounter>3)    //when pattern counter exceeds the numbers in array, then pattern counter is zero
+			{
+				fvs888.motor[0].patternCounter=0;
+			}
+		}
+	
+		//eo if statement of motor::
+	}
+
+	//eo if statement::
+}	
+//eo motor function::
+
+/***motor2******************************************************
+Author:     KSangeetha
+Date:		26 March,2020		
+Modified:	None
+Desc:		motor2 funcion which runs the dampener in the forward and reverse direction in the intervals of 3
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void motor2(void)
+{
+	if(fvs888.sensors[C].avgSample>fvs888.sensors[C].highLimit)
+	{
+		LATC&=0X00;
+		if(fvs888.motor[1].currentPosition!=fvs888.motor[1].position)
+		{
+			fvs888.motor[1].pattern=pattern[fvs888.motor[1].patternCounter];
+			LATC|=fvs888.motor[1].pattern;
+	
+			fvs888.motor[1].currentPosition+=3;
+
+			if(fvs888.motor[1].currentPosition>30)   //if current position exceeds 30 degrees, then current position of motor is zero
+			{
+				fvs888.motor[1].currentPosition=0;
+			}
+
+			fvs888.motor[1].patternCounter++;
+
+			if(fvs888.motor[1].patternCounter>3)    //when pattern counter exceeds the numbers in array, then pattern counter is zero
+			{
+				fvs888.motor[1].patternCounter=0;
+			}
+	
+		}
+		//eo if statement of motor::
+	}
+	else if(fvs888.sensors[C].avgSample>fvs888.sensors[C].lowLimit||fvs888.sensors[C].avgSample<fvs888.sensors[C].highLimit)
+	{	
+		LATC&=0X00;
+		if(fvs888.motor[1].currentPosition>0)
+		{
+			fvs888.motor[1].pattern=pattern[fvs888.motor[1].patternCounter];
+			LATC|=fvs888.motor[1].pattern;
+	
+			fvs888.motor[1].currentPosition-=3;
+
+			if(fvs888.motor[1].currentPosition<0)   //if current position is less than 0 degrees, then current position of motor is 30
+			{
+				fvs888.motor[1].currentPosition=30;
+			}
+
+			fvs888.motor[1].patternCounter--;
+
+			if(fvs888.motor[1].patternCounter<0)    //when pattern counter is less than zero, then pattern counter is 3
+			{
+				fvs888.motor[1].patternCounter=3;
+			}
+		}
+		//eo if statement of motor::
+	}	
+	//eo if::
+}	
+//eo motor function::
+
+
+/*** initializeSystem: ***********************************************************
+Author:		CTalbot
+Date:		14 Sept, 2016
+Modified:	KSangeetha 
+Desc:		Initalizing all the functions
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void initializeSystem(void)
+{
+	set_osc_p18f45k22_4MHz();           // Set the processor speed
+	portConfig();
+	initializeADC();					// Prepare the ADC module of the processor
+    serialConfig();
+	configTMR0();
+	initialiseFvs();	
+	configInterrupts();
+}	
+// eo initializeSystem::**********************************************************
+
+
+/***calcChecksum******************************************************
+Author:     KSangeetha
+Date:		26 March,2020		
+Modified:	None
+Desc:		checksum calculation using pointers 
+Input: 		None
+Returns:	None
+**********************************************************************************/
+char calcChecksum(char*ptr)
+{
+	char cs=0;
+	while(*ptr)
+	{
+		cs^=*ptr;
+		ptr++;
+	}
+	return cs;
+}//eo calcChecksum::
+
+/***printSentence: **************************************************************
+Author:		KSangeetha
+Date:		26 March,2020
+Modified:	None
+Desc:		The CONLIM sentence is printed in this function
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void printSentence(void)
+{
+	int output=0;
+	if(fvs888.mode==LOW)
+	{
+		fvs888.mode=0;
+	}
+	else
+	{
+		fvs888.mode=1;
+	}
+	if(fvs888.mode==HIGH&&fvs888.chanSel==T)
+	{
+		output=fvs888.sensors[T].highLimit;
+	}
+	else if(fvs888.mode==LOW&&fvs888.chanSel==T)
+	{
+		output=fvs888.sensors[T].lowLimit;
+	}
+	else if(fvs888.mode==HIGH&&fvs888.chanSel==P)
+	{
+		output=fvs888.sensors[P].highLimit;
+	}
+	else if(fvs888.mode==LOW&&fvs888.chanSel==P)
+	{
+		output=fvs888.sensors[P].lowLimit;
+	}
+	else if(fvs888.mode==HIGH&&fvs888.chanSel==C)
+	{
+		output=fvs888.sensors[C].highLimit;
+	}
+	else if(fvs888.mode==LOW&&fvs888.chanSel==C)
+	{
+		output=fvs888.sensors[C].lowLimit;
+	}
+	sprintf(buf,"$CONLIM,%i,%i,%i,%i,%i\0",CONTROLLER,ADDRESS,fvs888.chanSel,fvs888.mode,output);
+	sprintf(buf,"%s,%i#\0",buf,calcChecksum(buf));
+
+}//eo printSentence::
+	
+/***displayFunc : **************************************************************
+Author:		KSangeetha
+Date:		26 March,2020
+Modified:	None
+Desc:		Displaying of the functions on the output screen.
+Input: 		None
+Returns:	None
+**********************************************************************************/
+
+void displayFunc(void)
+{ 
+	if(fvs888.sensors[T].avgSample<TRUE)
+	{
+		printf("\033[2J\033[0;0HPlease wait until the samples are received...");
+	}
+	else 
+	{
+		printf("\033[2J\033[0;0HFVS888 SYSTEM888 PROPERTIES\r\n");
+		if(fvs888.chanSel==T)
+		{
+			printf("\033[2;0HChannel Selected:Temperature\t\r\n");
+		}
+		else if(fvs888.chanSel==P)
+		{
+			printf("\033[2;0HChannel Selected:Pressure\t\r\n");
+		}
+		else 
+		{
+			printf("\033[2;0HChannel Selected:Carbondioxide\t\r\n");
+		}
+		if(fvs888.mode==0)
+		{
+			printf("\033[2;50HMode:Low\r\n");
+		}
+		else
+		{
+			printf("\033[2;50HMode:High\r\n");
+		}
+		printf("\033[3;0HTEMPERATURE\033[3;25HPRESSURE\033[3;50HCO2\033[9;0HMotor1:Discharge\033[9;25HMotor2:Dampener\t\t\r\n");
+		printf("\033[4;0HCurrent:\t%i%cC\033[4;25HCurrent:\t%ikPa\033[4;50HCurrent:\t%ippm\033[10;0HPosition:\t%d%c\033[10;25HPosition:\t%d%c\r\n",fvs888.sensors[T].avgSample,248,fvs888.sensors[P].avgSample,fvs888.sensors[C].avgSample,fvs888.motor[0].currentPosition,248,fvs888.motor[1].currentPosition,248);
+		printf("\033[5;0HHighLimit:\t%i%cC\033[5;25HHighLimit:\t%ikPa\033[5;50HHighLimit:\t%ippm\r\n",fvs888.sensors[T].highLimit,248,fvs888.sensors[P].highLimit,fvs888.sensors[C].highLimit);
+   	    printf("\033[6;0HLowLimit:\t%i%cC\033[6;25HLowLimit:\t%ikPa\033[6;50HLowLimit:\t%ippm\033[12;0HData:\t0X%02X\r\n\033[12;25HData:\t0X%02X\r\n",fvs888.sensors[T].lowLimit,248,fvs888.sensors[P].lowLimit,fvs888.sensors[C].lowLimit,fvs888.motor[0].pattern,fvs888.motor[1].pattern);
+
+		if(fvs888.sensors[T].avgSample>fvs888.sensors[T].lowLimit&&fvs888.sensors[T].avgSample<fvs888.sensors[T].highLimit)   // when current temperature is between the limits of 12 and 65 degrees)	
+		{
+			printf("\033[7;0HStatus:\t\033[0;32mSafe\033[0m\r\n");
+		}
+		else if(fvs888.sensors[T].avgSample<fvs888.sensors[T].lowLimit)   // when current temperature is below low limit (12)
+		{
+			printf("\033[7;0HStatus:\t\033[0;31mAlarm\033[0m\r\n");	
+		}
+		else if(fvs888.sensors[T].avgSample>fvs888.sensors[T].highLimit)   // when current temperature is above the high limit (65)
+		{
+		printf("\033[7;0HStatus:\t\033[0;31mAlarm\033[0m\r\n");	
+		}
+		if(fvs888.sensors[P].avgSample>fvs888.sensors[P].lowLimit&&fvs888.sensors[P].avgSample<fvs888.sensors[P].highLimit)   // when current pressure is between the limits (17 and 103kPa)
+		{
+			printf("\033[7;25HStatus:\t\033[0;32mSAFE\033[0m\r\n");
+		}
+		else if(fvs888.sensors[P].avgSample<fvs888.sensors[P].lowLimit)     // when current pressure is below low limit (17)
+		{
+			printf("\033[7;25HStatus:\t\033[0;31mAlarm\033[0m\r\n");
+		}
+		else if(fvs888.sensors[P].avgSample>fvs888.sensors[P].highLimit)   // when current pressure is above high limit (103)
+		{	
+			printf("\033[7;25HStatus:\t\033[0;31mAlarm\033[0m\r\n");
+		}
+
+		if(fvs888.sensors[C].avgSample>fvs888.sensors[C].lowLimit||fvs888.sensors[C].avgSample<fvs888.sensors[C].highLimit) //when current CO2 is between the limits 350 and 1200ppm
+		{
+			printf("\033[7;50HStatus:\t\033[0;32mSAFE\033[0m\r\n");
+		}
+		if(fvs888.sensors[C].avgSample>fvs888.sensors[C].highLimit) //when current CO2 is above high limit 1200pm
+		{
+			printf("\033[7;50HStatus:\t\033[0;31mAlarm\033[0m\r\n");
+		}
+		if(fvs888.sensors[C].avgSample<fvs888.sensors[C].lowLimit)//when current CO2 is less than low limit
+		{
+			printf("\033[7;50HStatus:\t\033[0;31mAlarm\033[0m\r\n");
+		}
+
+
+
+		if(fvs888.sensors[T].avgSample<fvs888.sensors[T].lowLimit&&fvs888.sensors[P].avgSample<fvs888.sensors[P].lowLimit)
+		{
+			printf("\033[11;0HControl:STOP\r\n");
+		}	
+		if(fvs888.sensors[T].avgSample<fvs888.sensors[T].lowLimit&&fvs888.sensors[P].avgSample>fvs888.sensors[T].highLimit)
+		{
+			printf("\033[11;0HControl:RUN\r\n");
+		}	
+		if(fvs888.sensors[T].avgSample>fvs888.sensors[T].highLimit&&fvs888.sensors[P].avgSample<fvs888.sensors[P].lowLimit)
+		{
+			printf("\033[11;0HControl:RUN\r\n");
+		}
+		if(fvs888.sensors[T].avgSample>fvs888.sensors[P].highLimit&&fvs888.sensors[P].avgSample>fvs888.sensors[P].highLimit)   
+		{
+			printf("\033[11;0HControl:RUN\r\n");
+		}	
+		if(fvs888.sensors[T].avgSample>fvs888.sensors[T].lowLimit&&fvs888.sensors[T].avgSample<fvs888.sensors[T].highLimit)
+		{
+			printf("\033[11;0HControl:STOP\r\n");
+		}
+		if(fvs888.sensors[P].avgSample>fvs888.sensors[P].lowLimit&&fvs888.sensors[P].avgSample<fvs888.sensors[P].highLimit)
+		{
+			printf("\033[11;0HControl:STOP\r\n");
+		}
+		if(fvs888.sensors[T].avgSample>fvs888.sensors[T].highLimit&&fvs888.sensors[P].avgSample>fvs888.sensors[P].highLimit)
+		{
+			printf("\033[11;0HControl:RUN\r\n");
+		}
+		if(fvs888.sensors[T].avgSample>fvs888.sensors[T].lowLimit&&fvs888.sensors[T].avgSample<fvs888.sensors[T].highLimit&&fvs888.sensors[P].avgSample>fvs888.sensors[P].highLimit)
+		{
+			printf("\033[11;0HControl:RUN\r\n");
+		}	
+		if(fvs888.sensors[P].avgSample>fvs888.sensors[P].lowLimit&&fvs888.sensors[P].avgSample<fvs888.sensors[P].highLimit&&fvs888.sensors[T].avgSample>fvs888.sensors[T].highLimit) 
+		{
+			printf("\033[11;0HControl:RUN\r\n");
+		}
+		if(fvs888.sensors[C].avgSample>fvs888.sensors[C].lowLimit&&fvs888.sensors[C].avgSample<fvs888.sensors[C].highLimit)
+		{
+			printf("\033[11;25HControl:STOP\r\n");
+		}
+		if(fvs888.sensors[C].avgSample<fvs888.sensors[C].lowLimit)  
+		{
+			printf("\033[11;25HControl:STOP\r\n");
+		}
+		if(fvs888.sensors[P].avgSample>fvs888.sensors[P].highLimit) 
+		{
+			printf("\033[11;25HControl:RUN\r\n");
+		}	
+	}//eo else avgSample is true	
+}
+//eo displayFunc::
+
+void ISR(void);
+
+	#pragma code  interrupt_vector=0x08
+	void interrupt_vector()
+	{
+		_asm
+		GOTO ISR
+		_endasm
+	}
+
+
+#pragma code 
+
+
+/***collectSentence: **************************************************************
+Author:		KSangeetha
+Date:		04 April,2020
+Modified:	None
+Desc:		The sentence collection at the reciever side of the microcontroller
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void collectSentence(char *ptr)
+{
+	char sentenceReady=FALSE;
+	char hold=0;
+	char insert=0;
+	while(!sentenceReady)
+	{
+		if(RCFLAG)
+		{	
+			hold=RXBYTE;
+			if(hold=='$')
+			{
+				insert=0;
+			}
+			if(hold=='#')
+			{
+				sentenceReady=TRUE;
+			}
+			rxBuf[insert]=hold;
+			insert++;
+		}
+	}
+}
+#pragma interrupt ISR
+
+void ISR(void)
+{
+	if(RCFLAG)
+	{
+		PIE3bits.RC2IE=0;
+		collectSentence(rxBuf);
+		PIE3bits.RC2IE=1;
+	}
+}
+
+
+/***parseSentence: **************************************************************
+Author:		KSangeetha
+Date:		04 April,2020
+Modified:	None
+Desc:		Removing all unnecessary ones along with null and assigning tokens to each values. 
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void parseSentence(char *ptr)
+{
+	int insert=0;
+	while(*ptr)
+	{
+		if(*ptr=='$'||*ptr==',')
+		{
+			*ptr=0x00;
+			tokens[insert]=ptr+1;
+			insert++;
+		}
+		ptr++;
+	}
+}
+
+/***executeSentence: **************************************************************
+Author:		KSangeetha
+Date:		04 April,2020
+Modified:	None
+Desc:		Execution of a sentence into another microcontroller 
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void executeSentence()
+{
+	int output=0;
+	if(atoi(tokens[ADDYTO])==ADDRESS)
+	{
+		if(atoi(tokens[ADDYFM])==CONTROLLER)
+		{
+			if(strcmp(tokens[CMDSTM],"CONLIM"==0))
+			{
+				if(atoi(tokens[3])=='T')
+				{
+					fvs888.chanSel=atoi(tokens[3]);
+					if(atoi(tokens[4])=='H')
+					{
+						fvs888.mode=atoi(tokens[4]);
+						output=atoi(tokens[5]);
+					}
+					else
+					{
+						fvs888.mode=atoi(tokens[4]);
+						output=atoi(tokens[5]);	
+					}
+				}
+				if(atoi(tokens[3])=='P')
+				{
+					fvs888.chanSel=atoi(tokens[3]);
+					if(atoi(tokens[4])=='H')
+					{
+						fvs888.mode=atoi(tokens[4]);
+						output=atoi(tokens[5]);
+					}
+					else
+					{
+						fvs888.mode=atoi(tokens[4]);
+						output=atoi(tokens[5]);	
+					}
+				}
+				if(atoi(tokens[3])=='C')
+				{
+					fvs888.chanSel=atoi(tokens[3]);
+					if(atoi(tokens[4])=='H')
+					{
+						fvs888.mode=atoi(tokens[4]);
+						output=atoi(tokens[5]);
+					}
+					else
+					{
+						fvs888.mode=atoi(tokens[4]);
+						output=atoi(tokens[5]);	
+					}
+				}
+				
+			}
+		}
+	}
+}
+ 
+
+/***validateSentence: **************************************************************
+Author:		KSangeetha
+Date:		04 April,2020
+Modified:	None
+Desc:		Validation of sentence is done to check if the recieved values are the same
+Input: 		None
+Returns:	None
+**********************************************************************************/
+char validateSentence(char *ptr)
+{
+	char rcs=0,ncs=0,csFlag=FALSE;
+	int count=strlen(ptr);
+	while(!csFlag)
+	{
+		if(*(ptr+count)=='#')
+		{
+			*(ptr+count)=0x00;
+		}
+		if(*(ptr+count)==',')
+		{
+			*(ptr+count)=0x00;
+			rcs=atoi(ptr+count+1);
+			csFlag=TRUE;
+		}
+		count--;
+	}
+	if(ncs==rcs)
+	{
+		return TRUE;
+	}
+	else
+	{
+		return FALSE;
+	}
+}
+
+/***ledFn******************************************************
+Author:     KSangeetha
+Date:		14 Feb,2020		
+Modified:	None
+Desc:		led funcion 
+Input: 		None
+Returns:	None
+**********************************************************************************/
+void ledFn(void)
+{
+	if(fvs888.sensors[T].avgSample>fvs888.sensors[T].lowLimit&&fvs888.sensors[T].avgSample<fvs888.sensors[T].highLimit)   // when current temperature is between the limits of 12 and 65 degrees)
+	{
+		TEMPLOWLED=FALSE;
+		TEMPHIGHLED=FALSE;   
+		TROUBLE=FALSE;
+		HEATER=TRUE;
+	}
+	else if(fvs888.sensors[T].avgSample<fvs888.sensors[T].lowLimit)   // when current temperature is below low limit (12)
+	{
+		TEMPLOWLED=TRUE;
+		TEMPHIGHLED=FALSE;
+		HEATER=TRUE;
+  	    TROUBLE=TRUE;
+	}
+	else if(fvs888.sensors[T].avgSample>fvs888.sensors[T].highLimit)   // when current temperature is above the high limit (65)
+	{
+		TEMPLOWLED=FALSE;
+		TEMPHIGHLED=TRUE;
+		HEATER=FALSE;
+		TROUBLE=TRUE;
+	}
+	if(fvs888.sensors[P].avgSample>fvs888.sensors[P].lowLimit&&fvs888.sensors[P].avgSample<fvs888.sensors[P].highLimit)   // when current pressure is between the limits (17 and 103kPa)
+	{
+		PRESLOWLED=FALSE;
+		PRESHIGHLED=FALSE;
+		TROUBLE=FALSE;
+	}
+	else if(fvs888.sensors[P].avgSample<fvs888.sensors[P].lowLimit)     // when current pressure is below low limit (17)
+	{
+		PRESLOWLED=TRUE;
+		PRESHIGHLED=FALSE;
+		TROUBLE=TRUE;
+	}
+	else if(fvs888.sensors[P].avgSample>fvs888.sensors[P].highLimit)   // when current pressure is above high limit (103)
+	{	
+		PRESLOWLED=FALSE;
+		PRESHIGHLED=TRUE;
+		HEATER=FALSE;
+		TROUBLE=TRUE;
+	}
+	if(fvs888.sensors[C].avgSample>fvs888.sensors[C].lowLimit&&fvs888.sensors[C].avgSample<fvs888.sensors[C].highLimit) //when CO2 is within limits (350-1200ppm)
+	{
+		TROUBLE=FALSE;
+	}
+	if(fvs888.sensors[C].avgSample<fvs888.sensors[C].lowLimit)  //when CO2 is less than low limit 350ppm
+	{
+		TROUBLE=TRUE;
+	}
+	if(fvs888.sensors[C].avgSample>fvs888.sensors[C].highLimit) //when CO2 is greater than high limit 1200ppm
+	{
+		TROUBLE=TRUE;
+	}
+
+}	
+//eo led function::
+
+/*********************************************************************************
+***** MAIN FUNCTION **************************************************************
+**********************************************************************************/
+
+void main(void)	
+{
+	char sentenceReady=FALSE;
+	char secCount=0;
+	initializeSystem();	// Function call for setting the system I/Os and enabling the ADC module
+	while(1)    // Begin indefinite loop for program
+	{
+		
+    	if(TMR0FLAG) //timer for 0.25 seconds, here motors runs in 0.25 seconds while others are excecuted at 1 second interval
+		{
+        	resetTMR0(); //resetting timer
+			motor2();//calling motor2 function which runs dampener in forward and reverse direction in intervals of 3
+			secCount++;
+			if(secCount>=ONESEC) // to run for 1 sec (0.25*4=1)
+			{	
+				motor(); //calling of motor functions which runs till 357th position in intervals of 3
+				pbState();// pushbutton function call
+				secCount=0;
+				getNewSamples(); //calling of get sample functions
+				displayFunc();//calling display function
+				ledFn(); // calling of led function
+			
+				if(flag==1&&count<=5)
+				{
+					count++;
+					printSentence();//calling print sentence function 
+					printf("\e[K\e[16:0H%s\r",buf); //if count is less than or equal to 5 seconds, then CONLIM statement is printed
+				}
+				if(count>5) //if count exceeds 5 seconds, then nothing will be displayed in CONLIM
+				{
+					flag=FALSE;
+					count=0;
+					printf("\e[K\e[16:0H");
+				}	
+			}//eo if secCount::
+			if(sentenceReady)
+			{
+				if(validateSentence(buf)==TRUE)
+					{
+						parseSentence(buf);
+						executeSentence();
+					}
+					sentenceReady=TRUE;
+					validateReady=FALSE;
+			}
+		}
+		//eo if	TMR0::  
+	}
+	//eo while::
+}  
+//eo main::
+      
